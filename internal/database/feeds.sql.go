@@ -7,6 +7,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,7 +23,7 @@ VALUES (
     $5,
     $6
 )
-RETURNING id, created_at, updated_at, name, url, user_id
+RETURNING id, created_at, updated_at, name, url, user_id, last_fetched_at
 `
 
 type CreateFeedParams struct {
@@ -51,6 +52,7 @@ func (q *Queries) CreateFeed(ctx context.Context, arg CreateFeedParams) (Feed, e
 		&i.Name,
 		&i.Url,
 		&i.UserID,
+		&i.LastFetchedAt,
 	)
 	return i, err
 }
@@ -87,4 +89,63 @@ func (q *Queries) GetAllFeeds(ctx context.Context) ([]GetAllFeedsRow, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const getFeed = `-- name: GetFeed :one
+SELECT id, created_at, updated_at, name, url, user_id, last_fetched_at FROM feeds WHERE url = $1
+`
+
+func (q *Queries) GetFeed(ctx context.Context, url string) (Feed, error) {
+	row := q.db.QueryRowContext(ctx, getFeed, url)
+	var i Feed
+	err := row.Scan(
+		&i.ID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Name,
+		&i.Url,
+		&i.UserID,
+		&i.LastFetchedAt,
+	)
+	return i, err
+}
+
+const getNextFeedToFetch = `-- name: GetNextFeedToFetch :one
+SELECT feeds.id, feeds.created_at, feeds.updated_at, feeds.name, feeds.url, feeds.user_id, feeds.last_fetched_at FROM
+feeds JOIN feed_follows ON feeds.id = feed_follows.feed_id 
+WHERE feed_follows.user_id = $1
+ORDER BY last_fetched_at ASC NULLS FIRST
+`
+
+func (q *Queries) GetNextFeedToFetch(ctx context.Context, userID uuid.UUID) (Feed, error) {
+	row := q.db.QueryRowContext(ctx, getNextFeedToFetch, userID)
+	var i Feed
+	err := row.Scan(
+		&i.ID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Name,
+		&i.Url,
+		&i.UserID,
+		&i.LastFetchedAt,
+	)
+	return i, err
+}
+
+const markFeedFetched = `-- name: MarkFeedFetched :exec
+UPDATE feeds SET
+last_fetched_at = $1,
+updated_at = $2
+WHERE id = $3
+`
+
+type MarkFeedFetchedParams struct {
+	LastFetchedAt sql.NullTime
+	UpdatedAt     time.Time
+	ID            uuid.UUID
+}
+
+func (q *Queries) MarkFeedFetched(ctx context.Context, arg MarkFeedFetchedParams) error {
+	_, err := q.db.ExecContext(ctx, markFeedFetched, arg.LastFetchedAt, arg.UpdatedAt, arg.ID)
+	return err
 }
